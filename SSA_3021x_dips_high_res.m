@@ -5,10 +5,10 @@ analyzerIP = '192.168.0.50';
 port = 5025;
 timeout = 120; 
 
-dipLogFilename = 'dip_locations.txt'; % CHANGE THIS TO EXACT FILE NAME
-segmentSpan    = 4e3;                 % 4 kHz segment width
-targetAvg      = 100;                 % 100 averages
-analogRBW      = 3;                   % 3 Hz RBW
+dipLogFilename = 'dip_locations.txt';  % CHANGE THIS TO EXACT FILE NAME
+segmentSpan    = 20e3;                 % 20 kHz segment width
+targetAvg      = 100;                  % 100 averages
+analogRBW      = 10;                   % 10 Hz RBW
 
 try
     fprintf('STATUS: Loading dip coordinates from %s...\n', dipLogFilename);

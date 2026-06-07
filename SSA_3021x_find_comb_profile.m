@@ -5,9 +5,9 @@ analyzerIP = '192.168.0.50';
 port = 5025;
 timeout = 60;
 
-broadStartFreq = 30.0e6;
-broadStopFreq  = 50.0e6;
-analogRBW       = 100;         % 100 Hz
+broadStartFreq = 5e6;
+broadStopFreq  = 25e6;
+analogRBW       = 1000;        % 1 kHz
 snr_margin     = 26;           % dB drop from absolute peak for cutoff
 
 try

@@ -5,13 +5,13 @@ analyzerIP = '192.168.0.50';
 port = 5025;
 timeout = 120;
 
-scanStartFreq  = 38.5e6;      % determined by step 1 rough scan (find comb profile)
-scanStopFreq   = 40.5e6;      % determined by step 1 rough scan (find comb profile)
-segmentSpan    = 100e3;       % 100 kHz segments
-targetAvg      = 100;         % 100 averages
-analogRBW      = 30;          % 30 Hz RBW
-dipThresholdDB = 0.7;         % 0.7 dB threshold
-expectedWidthHz = 1000;       % Expected physical dip width (1000 Hz)
+scanStartFreq  = 10e6;        % determined by step 1 rough scan (find comb profile)
+scanStopFreq   = 20e6;        % determined by step 1 rough scan (find comb profile)
+segmentSpan    = 400e3;       % 400 kHz segments
+targetAvg      = 50;          % 500 averages
+analogRBW      = 300;         % 300 Hz RBW
+dipThresholdDB = 2.5;         % 2.5 dB threshold
+expectedWidthHz = 4000;       % Expected physical dip width (4000 Hz)
 
 try
     fprintf('STATUS: Checking TCP connection to %s...\n', analyzerIP);
