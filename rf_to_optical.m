@@ -317,16 +317,16 @@ function build_ui(P, D, M, X)
     % --------- SLIDERS ----------
     uicontrol(fig,'Style','text','Units','normalized','Position',[0.055 0.255 0.10 0.022], ...
         'String','Stretch  m','FontWeight','bold','HorizontalAlignment','left','BackgroundColor',BG);
-    sM = uicontrol(fig,'Style','slider','Units','normalized','Position',[0.155 0.257 0.40 0.024], ...
+    sM = uicontrol(fig,'Style','slider','Units','normalized','Position',[0.155 0.257 0.335 0.024], ...
         'Min',-100000,'Max',100000,'Value',M.m_line_ppm);
-    tM = uicontrol(fig,'Style','text','Units','normalized','Position',[0.56 0.255 0.115 0.024], ...
+    tM = uicontrol(fig,'Style','text','Units','normalized','Position',[0.495 0.255 0.18 0.024], ...
         'String','','HorizontalAlignment','left','BackgroundColor',BG,'FontSize',8);
 
     uicontrol(fig,'Style','text','Units','normalized','Position',[0.055 0.213 0.10 0.022], ...
         'String','Offset  b','FontWeight','bold','HorizontalAlignment','left','BackgroundColor',BG);
-    sB = uicontrol(fig,'Style','slider','Units','normalized','Position',[0.155 0.215 0.40 0.024], ...
+    sB = uicontrol(fig,'Style','slider','Units','normalized','Position',[0.155 0.215 0.335 0.024], ...
         'Min',-30,'Max',30,'Value',M.b_line_THz);
-    tB = uicontrol(fig,'Style','text','Units','normalized','Position',[0.56 0.213 0.115 0.024], ...
+    tB = uicontrol(fig,'Style','text','Units','normalized','Position',[0.495 0.213 0.18 0.024], ...
         'String','','HorizontalAlignment','left','BackgroundColor',BG,'FontSize',8);
 
     % --------- ACTION BUTTONS (bottom row) ----------
@@ -505,6 +505,7 @@ function set_mapping(fig, m_full, b_full, do_autoscale)
     setappdata(fig,'S',S);
     if nargin>3 && do_autoscale, autoscale_comp(fig); end
     refresh(fig);
+    drawnow;   % force the slider thumbs to repaint to their new programmatic values
 end
 
 function snap_to(fig, kind)
@@ -595,14 +596,17 @@ function refresh(fig)
     S = getappdata(fig,'S');
     m = S.m_base*(1+S.sM.Value*1e-6); b = S.b_base_Hz + S.sB.Value*1e12;
     frep_THz = S.f_rep_1/1e12; rfc = S.rf_centers_Hz; rfd = S.rf_depths;
-    set(S.tM,'String',sprintf('%+.0f ppm', S.sM.Value));
-    set(S.tB,'String',sprintf('%.4e Hz', b));
+    % label shows the ABSOLUTE multiplier m used in f_opt=m*f_rf+b, plus the ppm
+    % deviation from the nominal m_base (the quantity the slider actually tunes).
+    set(S.tM,'String',sprintf('m = %.3f  (%+.0f ppm)', m, S.sM.Value));
+    set(S.tB,'String',sprintf('b = %.4e Hz', b));
 
     mapped = (m*rfc + b)/1e12;
     tt = teeth_to_nearest(m, b, rfc, S.sig_hitran_THz, frep_THz);
     cols = zeros(numel(rfc),3);
     for i = 1:numel(rfc), cols(i,:) = mismatch_color(tt(i)); end
-    useCol = S.cbCol.Value && strcmp(S.mode,'line');
+    colOn  = logical(S.cbCol.Value);
+    useCol = colOn && strcmp(S.mode,'line');
     hl = S.dHl.Value;
 
     for i = 1:numel(rfc)
@@ -617,16 +621,17 @@ function refresh(fig)
         set(S.pC(hl-1),'Color',[0 0.2 0.9],'LineWidth',3);
     end
 
-    % residual scatter
-    set(S.hRes,'XData',mapped,'YData',tt,'CData',cols);
+    % residual scatter — also obeys the "colour by mismatch" checkbox
+    if colOn, residCols = cols; else, residCols = repmat([0.20 0.40 0.90],numel(rfc),1); end
+    set(S.hRes,'XData',mapped,'YData',tt,'CData',residCols);
     mx = max([2; abs(tt(:))]);
     ylim(S.axR,[-1.15*mx 1.15*mx]); xlim(S.axR, xlim(S.axC));
 
     % quality readout
     nmatch = sum(~isnan(assign_lines(mapped, S.sig_hitran_THz, frep_THz)));
-    S.tQual.String = sprintf(['RMS mismatch : %6.2f teeth\nMax mismatch : %6.2f teeth\n' ...
-        'Matched 1:1  : %4d / %d\n\nstretch m : %+.0f ppm\noffset  b : %.5e Hz'], ...
-        rms(tt), max(abs(tt)), nmatch, numel(rfc), S.sM.Value, b);
+    S.tQual.String = sprintf(['RMS mismatch  : %6.2f teeth\nMean |mismatch|: %6.2f teeth\n' ...
+        'Max mismatch  : %6.2f teeth\nMatched 1:1   : %4d / %d\n\nstretch m : %+.0f ppm\noffset  b : %.5e Hz'], ...
+        rms(tt), mean(abs(tt)), max(abs(tt)), nmatch, numel(rfc), S.sM.Value, b);
 
     draw_mismatch(fig, m, b);
 end
@@ -700,10 +705,29 @@ function export_results(fig)
     [fn,pn] = uiputfile('*.csv','Export mapping results', fullfile(S.folderPath,'rf_to_optical_results.csv'));
     if isequal(fn,0), return; end
     fid = fopen(fullfile(pn,fn),'wt');
-    fprintf(fid,'# RF->Optical mapping results\n');
-    fprintf(fid,'# f_opt = m*f_rf + b ; m=%.10g ; b=%.10g Hz\n', m, b);
-    fprintf(fid,'# stretch=%+.1f ppm (vs m_base=%.6f) ; RMS=%.3f teeth ; max=%.3f teeth\n', ...
-        S.sM.Value, S.m_base, rms(tt), max(abs(tt)));
+    fprintf(fid,'# RF -> Optical mapping results\n');
+    fprintf(fid,'# Mapping model:  f_opt = m * f_rf + b\n');
+    fprintf(fid,'#\n');
+    fprintf(fid,'# Applied mapping (current sliders)\n');
+    fprintf(fid,'#   m (stretch) = %.10g\n', m);
+    fprintf(fid,'#   b (offset)  = %.10g Hz\n', b);
+    fprintf(fid,'#\n');
+    fprintf(fid,'# Theoretical mapping (from comb parameters)\n');
+    fprintf(fid,'#   m_theoretical = %.10g\n', S.m_base);
+    fprintf(fid,'#   b_theoretical = %.10g Hz\n', S.b_base_nominal_Hz);
+    fprintf(fid,'#\n');
+    fprintf(fid,'# Comb parameters (Hz)\n');
+    fprintf(fid,'#   f_rep_1 = %.6f\n', S.P.f_rep_1);
+    fprintf(fid,'#   f_ceo_1 = %.6f\n', S.P.f_ceo_1);
+    fprintf(fid,'#   f_rep_2 = %.6f\n', S.P.f_rep_2);
+    fprintf(fid,'#   f_ceo_2 = %.6f\n', S.P.f_ceo_2);
+    fprintf(fid,'#\n');
+    fprintf(fid,'# Mapping quality\n');
+    fprintf(fid,'#   RMS mismatch    = %.3f teeth\n', rms(tt));
+    fprintf(fid,'#   Mean |mismatch| = %.3f teeth\n', mean(abs(tt)));
+    fprintf(fid,'#   Max mismatch    = %.3f teeth\n', max(abs(tt)));
+    fprintf(fid,'#   Matched 1:1     = %d / %d\n', sum(~isnan(tgt)), numel(tt));
+    fprintf(fid,'#\n');
     fprintf(fid,'file,rf_center_Hz,rf_center_MHz,mapped_THz,assigned_line_THz,mismatch_teeth,depth_dB\n');
     for i = 1:numel(S.rf_centers_Hz)
         if isnan(tgt(i)), tl = NaN; else, tl = tgt(i); end
