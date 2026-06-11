@@ -203,12 +203,6 @@ function M = compute_map(P, D)
     lm = (sig > band_center-5) & (sig < band_center+5);
     M.filtered_lines_THz = sig(lm);  M.filtered_intensity = sigI(lm);
 
-    % profile fit (continuous curve)
-    opt = optimset('Display','off','TolFun',1e-6,'TolX',1e-6);
-    bp = fminsearch(@(p) prof_obj(p, m_macro, b_macro, D.rf_data_cell, D.hitran_interp), [0,0], opt);
-    M.m_prof_ppm = m_macro_ppm + bp(1);
-    M.b_prof_THz = ((b_macro + bp(2)*1e9) - b_base)/1e12;
-
     % line fit: resolve the mode by teeth-RMS, then fit curvature of the order
     if ~isfield(P,'map_order'), P.map_order = 1; end
     ord = P.map_order;
@@ -338,15 +332,6 @@ function tgt = assign_lines(f0_THz, sig, frep_THz)
     end
 end
 
-function s = prof_obj(p, mb, bb, rf, hit)
-    if abs(p(1))>5000 || abs(p(2))>50, s=1e9; return; end
-    m = mb*(1+p(1)*1e-6); b = bb+p(2)*1e9; s = 0;
-    for i=1:length(rf)
-        e = hit(m*rf{i}(:,1)+b); e(isnan(e))=0;
-        s = s - sum((rf{i}(:,2).^3) .* (e.^3));
-    end
-end
-
 function cst = lor_cost(p, f, d, lb, ub)
     if p(1)<lb(1)||p(1)>ub(1)||p(2)<lb(2)||p(2)>ub(2)||abs(p(3))<lb(3)||abs(p(3))>ub(3)
         cst = 1e18; return;
@@ -424,41 +409,50 @@ function build_ui(P, D, M, X)
     bw = 0.099; bx = 0.055; by = 0.045; bh = 0.05; gap = 0.005;
     btnTheo  = uicontrol(fig,'Style','pushbutton','Units','normalized','String','Theoretical', ...
         'Position',[bx by bw bh],'TooltipString','Pure comb-equation mapping (f_{rep}, f_{ceo} only)');
-    btnProf  = uicontrol(fig,'Style','pushbutton','Units','normalized','String','Profile Fit', ...
-        'Position',[bx+(bw+gap) by bw bh],'TooltipString','Refine vs the continuous Voigt curve');
-    btnLine  = uicontrol(fig,'Style','pushbutton','Units','normalized','String','Line Fit', ...
-        'Position',[bx+2*(bw+gap) by bw bh],'TooltipString','Best line-to-line ICP solution');
+    btnLine  = uicontrol(fig,'Style','pushbutton','Units','normalized','String','Auto Fit', ...
+        'Position',[bx+(bw+gap) by bw bh],'TooltipString','Auto-find the best mapping: teeth-RMS mode search + polynomial of the chosen order');
     btnSnap  = uicontrol(fig,'Style','pushbutton','Units','normalized','String','Local Peak Snap', ...
-        'Position',[bx+3*(bw+gap) by bw bh],'TooltipString','Re-converge ICP from the current alignment');
+        'Position',[bx+2*(bw+gap) by bw bh],'TooltipString','Re-converge the fit from the current alignment');
     btnMdn   = uicontrol(fig,'Style','pushbutton','Units','normalized','String','Prev Mode', ...
-        'Position',[bx+4*(bw+gap) by bw bh],'TooltipString','Shift registration one HITRAN line down, then snap');
+        'Position',[bx+3*(bw+gap) by bw bh],'TooltipString','Shift registration one HITRAN line down, then snap');
     btnMup   = uicontrol(fig,'Style','pushbutton','Units','normalized','String','Next Mode', ...
-        'Position',[bx+5*(bw+gap) by bw bh],'TooltipString','Shift registration one HITRAN line up, then snap');
+        'Position',[bx+4*(bw+gap) by bw bh],'TooltipString','Shift registration one HITRAN line up, then snap');
 
     % --------- RIGHT COLUMN PANELS ----------
-    % View
+    % View  (display style is decoupled from the mapping — both views use the same fit)
     pView = uipanel(fig,'Title','View','FontWeight','bold','BackgroundColor',BG, ...
-        'Position',[0.70 0.74 0.285 0.215]);
-    cbH = uicontrol(pView,'Style','checkbox','Units','normalized','Position',[0.06 0.78 0.9 0.16], ...
+        'Position',[0.70 0.745 0.285 0.21]);
+    uicontrol(pView,'Style','text','Units','normalized','Position',[0.06 0.83 0.28 0.11], ...
+        'String','View as:','HorizontalAlignment','left','BackgroundColor',BG);
+    dViewAs = uicontrol(pView,'Style','popupmenu','Units','normalized','Position',[0.36 0.84 0.58 0.12], ...
+        'String',{'Lines','Profile'},'Value',1, ...
+        'TooltipString','Display style only; the mapping is identical either way');
+    cbH = uicontrol(pView,'Style','checkbox','Units','normalized','Position',[0.06 0.66 0.9 0.13], ...
         'String','Show HITRAN','Value',1,'BackgroundColor',BG);
-    cbR = uicontrol(pView,'Style','checkbox','Units','normalized','Position',[0.06 0.60 0.9 0.16], ...
+    cbR = uicontrol(pView,'Style','checkbox','Units','normalized','Position',[0.06 0.52 0.9 0.13], ...
         'String','Show RF data','Value',1,'BackgroundColor',BG);
-    cbCol = uicontrol(pView,'Style','checkbox','Units','normalized','Position',[0.06 0.42 0.9 0.16], ...
+    cbCol = uicontrol(pView,'Style','checkbox','Units','normalized','Position',[0.06 0.38 0.9 0.13], ...
         'String','Colour dips by mismatch','Value',1,'BackgroundColor',BG);
-    uicontrol(pView,'Style','text','Units','normalized','Position',[0.06 0.22 0.5 0.13], ...
+    uicontrol(pView,'Style','text','Units','normalized','Position',[0.06 0.20 0.5 0.11], ...
         'String','Highlight file:','HorizontalAlignment','left','BackgroundColor',BG);
-    dHl = uicontrol(pView,'Style','popupmenu','Units','normalized','Position',[0.06 0.05 0.88 0.16], ...
+    dHl = uicontrol(pView,'Style','popupmenu','Units','normalized','Position',[0.06 0.04 0.88 0.13], ...
         'String',[{'None'}, X.valid_filenames]);
 
     % Quality
     pQual = uipanel(fig,'Title','Mapping Quality','FontWeight','bold','BackgroundColor',BG, ...
-        'Position',[0.70 0.50 0.285 0.225]);
+        'Position',[0.70 0.565 0.285 0.17]);
     tQual = uicontrol(pQual,'Style','text','Units','normalized','Position',[0.04 0.04 0.93 0.92], ...
+        'String','','HorizontalAlignment','left','BackgroundColor',[1 1 1],'FontName','Menlo','FontSize',9);
+
+    % Mapping Equation (live coefficients of the chosen-order polynomial)
+    pEq = uipanel(fig,'Title','Mapping Equation','FontWeight','bold','BackgroundColor',BG, ...
+        'Position',[0.70 0.385 0.285 0.17]);
+    tEq = uicontrol(pEq,'Style','text','Units','normalized','Position',[0.04 0.04 0.93 0.92], ...
         'String','','HorizontalAlignment','left','BackgroundColor',[1 1 1],'FontName','Menlo','FontSize',9);
 
     % Comb parameters
     pPar = uipanel(fig,'Title','Comb Parameters (Hz)','FontWeight','bold','BackgroundColor',BG, ...
-        'Position',[0.70 0.135 0.285 0.35]);
+        'Position',[0.70 0.125 0.285 0.25]);
     lblP = {'f_{rep,1}','f_{ceo,1}','f_{rep,2}','f_{ceo,2}'};
     valP = {P.f_rep_1, P.f_ceo_1, P.f_rep_2, P.f_ceo_2};
     eP = gobjects(4,1);
@@ -516,7 +510,7 @@ function build_ui(P, D, M, X)
     S.P = P; S.D = D;
     S.m_base = M.m_base; S.b_base_Hz = M.b_base_Hz; S.b_base_nominal_Hz = M.b_base_nominal_Hz;
     S.f_rep_1 = P.f_rep_1; S.mean_rf_Hz = D.mean_rf_Hz;
-    S.m_macro_ppm = M.m_macro_ppm; S.m_prof_ppm = M.m_prof_ppm; S.b_prof_THz = M.b_prof_THz;
+    S.m_macro_ppm = M.m_macro_ppm;
     S.m_line_ppm = M.m_line_ppm; S.b_line_THz = M.b_line_THz; S.b_theo_THz = M.b_theo_THz;
     S.a2 = M.a2; S.a3 = M.a3; S.uc = M.uc; S.us = M.us; S.order = M.order;
     S.filtered_lines_THz = M.filtered_lines_THz; S.filtered_intensity = M.filtered_intensity;
@@ -529,16 +523,16 @@ function build_ui(P, D, M, X)
     S.fig=fig; S.axC=axC; S.axR=axR; S.h_voigt=h_voigt; S.h_lines=h_lines;
     S.pC=pC; S.pS=pS; S.hRes=hRes; S.sM=sM; S.sB=sB; S.tM=tM; S.tB=tB;
     S.cbH=cbH; S.cbR=cbR; S.cbCol=cbCol; S.dHl=dHl; S.tQual=tQual; S.eP=eP; S.dOrd=dOrd;
+    S.dViewAs=dViewAs; S.tEq=tEq;
     S.axV=axV; S.pr=pr; S.pt=pt; S.pfl=pfl; S.pff=pff; S.pcl=pcl; S.tV=tV; S.dV=dV;
     S.figM=figM; S.axM=a3; S.axMt=a3t; S.t3=t3; S.d3=d3;
-    S.mode='line'; S.guard=false;
+    S.view='lines'; S.guard=false;
     S.anchor_Hz = (S.m_base*(1+S.m_line_ppm*1e-6))*S.mean_rf_Hz + (S.b_base_Hz + S.b_line_THz*1e12);
     setappdata(fig,'S',S);
 
     % --------- WIRE CALLBACKS ----------
     btnTheo.Callback = @(s,e) snap_to(fig,'theo');
-    btnProf.Callback = @(s,e) snap_to(fig,'prof');
-    btnLine.Callback = @(s,e) snap_to(fig,'line');
+    btnLine.Callback = @(s,e) snap_to(fig,'auto');
     btnSnap.Callback = @(s,e) local_snap(fig);
     btnMdn.Callback  = @(s,e) mode_step(fig,-1);
     btnMup.Callback  = @(s,e) mode_step(fig,+1);
@@ -548,6 +542,7 @@ function build_ui(P, D, M, X)
     cbR.Callback   = @(s,e) apply_view(fig);
     cbCol.Callback = @(s,e) refresh(fig);
     dHl.Callback   = @(s,e) apply_view(fig);
+    dViewAs.Callback = @(s,e) apply_view(fig);
     dOrd.Callback  = @(s,e) apply_order(fig);
     addlistener(sM,'Value','PostSet',@(s,e) on_slider(fig,'m'));
     addlistener(sB,'Value','PostSet',@(s,e) on_slider(fig,'b'));
@@ -602,26 +597,22 @@ function set_mapping(fig, m_full, b_full, a2, a3, do_autoscale)
 end
 
 function snap_to(fig, kind)
+    % Compute a mapping and load it onto the sliders. Display style (lines vs
+    % profile) is independent and not touched here.
     S = getappdata(fig,'S');
     switch kind
         case 'theo'                                       % pure comb equations, no curvature
-            m = S.m_base; b = S.b_base_nominal_Hz; a2 = 0; a3 = 0; md = 'prof';
-        case 'prof'                                       % linear profile refine, keep curvature
-            m = S.m_base*(1+S.m_prof_ppm*1e-6); b = S.b_base_Hz + S.b_prof_THz*1e12;
-            a2 = S.a2; a3 = S.a3; md = 'prof';
-        case 'line'                                       % robust mode search + curvature at current order
+            m = S.m_base; b = S.b_base_nominal_Hz; a2 = 0; a3 = 0;
+        case 'auto'                                       % robust mode search + curvature at current order
             m_macro = S.m_base*(1+S.m_macro_ppm*1e-6);
             center_macro = S.b_base_Hz + m_macro*S.mean_rf_Hz;
             [m, b, a2, a3, nv] = line_fit_best(S.m_base, center_macro, S.mean_rf_Hz, S.uc, S.us, ...
                 S.order, S.rf_centers_Hz, S.sig_hitran_THz, S.f_rep_1, 60000);
-            if nv < S.order+1                             % fall back to stored line fit
+            if nv < S.order+1                             % fall back to stored fit
                 m = S.m_base*(1+S.m_line_ppm*1e-6); b = S.b_base_Hz + S.b_line_THz*1e12;
                 a2 = S.a2; a3 = S.a3;
             end
-            md = 'line';
     end
-    S.mode = md; setappdata(fig,'S',S);
-    apply_view(fig);
     set_mapping(fig, m, b, a2, a3, true);
 end
 
@@ -682,19 +673,23 @@ function recompute(fig)
     M = compute_map(P, S.D);
     S.P = P; S.f_rep_1 = P.f_rep_1;
     S.m_base=M.m_base; S.b_base_Hz=M.b_base_Hz; S.b_base_nominal_Hz=M.b_base_nominal_Hz;
-    S.m_macro_ppm=M.m_macro_ppm; S.m_prof_ppm=M.m_prof_ppm; S.b_prof_THz=M.b_prof_THz;
+    S.m_macro_ppm=M.m_macro_ppm;
     S.m_line_ppm=M.m_line_ppm; S.b_line_THz=M.b_line_THz; S.b_theo_THz=M.b_theo_THz;
     S.a2=M.a2; S.a3=M.a3; S.uc=M.uc; S.us=M.us; S.order=M.order;
     S.filtered_lines_THz=M.filtered_lines_THz; S.filtered_intensity=M.filtered_intensity;
     setappdata(fig,'S',S);
     set(S.h_lines,'XData',M.filtered_lines_THz,'YData',M.filtered_intensity);
-    snap_to(fig,'line');     % jump to the new line fit
+    snap_to(fig,'auto');     % jump to the new best fit
 end
 
 % ----------------------- VIEW & REFRESH ---------------------------------
 function apply_view(fig)
-    % Set visibility of HITRAN + RF objects from the checkboxes, mode & highlight.
-    S = getappdata(fig,'S'); isLine = strcmp(S.mode,'line');
+    % Set visibility of HITRAN + RF objects from the "View as" popup, the
+    % show/hide checkboxes, and the highlight selection. Display style ONLY —
+    % the mapping is unchanged.
+    S = getappdata(fig,'S');
+    S.view = tern(S.dViewAs.Value==1,'lines','profile'); setappdata(fig,'S',S);
+    isLine = strcmp(S.view,'lines');
     if S.cbH.Value
         set(S.h_voigt,'Visible', tern(isLine,'off','on'));
         set(S.h_lines,'Visible', tern(isLine,'on','off'));
@@ -727,7 +722,7 @@ function refresh(fig)
     cols = zeros(numel(rfc),3);
     for i = 1:numel(rfc), cols(i,:) = mismatch_color(tt(i)); end
     colOn  = logical(S.cbCol.Value);
-    useCol = colOn && strcmp(S.mode,'line');
+    useCol = colOn;                                  % colour applies to both views now
     hl = S.dHl.Value;
 
     for i = 1:numel(rfc)
@@ -735,7 +730,7 @@ function refresh(fig)
         set(S.pS(i),'XData',mapped(i),'YData',rfd(i));
         if useCol, c = cols(i,:); else, c = [0.85 0 0]; end
         set(S.pS(i),'Color',c,'MarkerFaceColor',c);
-        set(S.pC(i),'Color',[0.85 0 0]);
+        set(S.pC(i),'Color',c);
     end
     if hl > 1   % highlighted file: blue + bold
         set(S.pS(hl-1),'Color',[0 0.2 0.9],'MarkerFaceColor',[0 0.2 0.9],'LineWidth',2.2);
@@ -763,7 +758,36 @@ function refresh(fig)
         rms(tt), mean(abs(tt)), max(abs(tt)), nmatch, numel(rfc), ...
         S.order, ordname{S.order}, curv_teeth, S.sM.Value, b);
 
+    % live mapping equation (absolute-Hz coefficients of the chosen order)
+    set(S.tEq,'String', equation_str(S, m, b));
+
     draw_mismatch(fig);
+end
+
+function [c0,c1,c2,c3] = poly_coeffs(S, m, b)
+% Expand the mapping (slider linear part m,b + curvature a2,a3 in u-space,
+% u=(f_rf-uc)/us) to absolute-frequency coefficients:
+%   f_opt = c3*f_rf^3 + c2*f_rf^2 + c1*f_rf + c0   (Hz)
+    a2 = S.a2; a3 = S.a3; uc = S.uc; us = S.us; ord = S.order;
+    if ord < 3, a3 = 0; end
+    if ord < 2, a2 = 0; end
+    c3 = a3/us^3;
+    c2 = a2/us^2 - 3*a3*uc/us^3;
+    c1 = m - 2*a2*uc/us^2 + 3*a3*uc^2/us^3;
+    c0 = b + a2*uc^2/us^2 - a3*uc^3/us^3;
+end
+
+function str = equation_str(S, m, b)
+% Multi-line display of the chosen-order mapping polynomial + its coefficients.
+    [c0,c1,c2,c3] = poly_coeffs(S, m, b);
+    forms = {'c1*f_rf + c0', ...
+             'c2*f_rf^2 + c1*f_rf + c0', ...
+             'c3*f_rf^3 + c2*f_rf^2 + c1*f_rf + c0'};
+    str = sprintf('f_opt = %s\n(f_rf, f_opt in Hz)\n\n', forms{S.order});
+    if S.order>=3, str = [str sprintf('c3 = %+ .8e\n', c3)]; end
+    if S.order>=2, str = [str sprintf('c2 = %+ .8e\n', c2)]; end
+    str = [str sprintf('c1 = %+ .8e\n', c1)];
+    str = [str sprintf('c0 = %+ .8e', c0)];
 end
 
 function draw_mismatch(fig)
@@ -835,13 +859,8 @@ function export_results(fig)
 
     % Expand the mapping to absolute-frequency polynomial coefficients so it can
     % be applied directly:  f_opt = c3*f_rf^3 + c2*f_rf^2 + c1*f_rf + c0  (Hz).
-    a2 = S.a2; a3 = S.a3; uc = S.uc; us = S.us; ord = S.order;
-    if ord < 3, a3 = 0; end
-    if ord < 2, a2 = 0; end
-    c3 = a3/us^3;
-    c2 = a2/us^2 - 3*a3*uc/us^3;
-    c1 = m - 2*a2*uc/us^2 + 3*a3*uc^2/us^3;
-    c0 = b + a2*uc^2/us^2 - a3*uc^3/us^3;
+    [c0,c1,c2,c3] = poly_coeffs(S, m, b);
+    ord = S.order;
     ordname = {'linear','quadratic','cubic'};
 
     [fn,pn] = uiputfile('*.csv','Export mapping results', fullfile(S.folderPath,'rf_to_optical_results.csv'));
