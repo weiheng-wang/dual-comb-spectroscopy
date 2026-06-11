@@ -12,6 +12,9 @@ P.f_rep_1 = 200.002499650406e6;
 P.f_ceo_1 = -40e6;
 P.f_rep_2 = 200.002531049574e6;
 P.f_ceo_2 = -39e6;
+P.map_order = 1;            % mapping polynomial order: 1=linear, 2=quadratic, 3=cubic
+                           % (comb dispersion makes the RF->optical map non-linear;
+                           %  selectable live in the UI via the "Map order" popup)
 
 snr_threshold   = 8.0;
 min_dip_depth   = 1.5;
@@ -85,7 +88,11 @@ for i = 1:length(rawFiles)
     if numel(teeth_power) < min_teeth_width, continue; end
     teeth_freq = freq(teeth_idx);
 
-    local_baseline = max(teeth_power); dip_profile = local_baseline - teeth_power;
+    % Curved comb-power envelope (robust upper fit) so the Gaussian envelope's
+    % slope/curvature over this small RF window doesn't bias the dip extent or
+    % centre. Absorption only pushes teeth DOWN, so the envelope tracks the tops.
+    [baseline_vec, env_fun] = comb_envelope(teeth_freq, teeth_power);
+    dip_profile = max(baseline_vec - teeth_power, 0);
     max_dip = max(dip_profile);
 
     ds = sort(dip_profile);                            % robust baseline noise
@@ -102,7 +109,6 @@ for i = 1:length(rawFiles)
 
     t_freq_crop = teeth_freq(v_idx); dip_crop = dip_profile(v_idx);
     tp_crop     = teeth_power(v_idx);
-    n_keep      = numel(dip_crop);
 
     % Bounded Lorentzian fit (all teeth kept) for the sub-tooth centre + curve.
     lor      = @(p,f) p(1).*(p(3)/2).^2 ./ ((f - p(2)).^2 + (p(3)/2).^2);
@@ -117,7 +123,7 @@ for i = 1:length(rawFiles)
     fit_params = fminsearch(@(p) lor_cost(p, t_freq_crop, dip_crop, lb, ub), guess, optimset('Display','off'));
 
     rf_raw_cell{end+1}    = [freq, power]; %#ok<SAGROW>
-    rf_data_cell{end+1}   = [t_freq_crop, dip_crop, tp_crop, repmat(local_baseline, n_keep, 1)]; %#ok<SAGROW>
+    rf_data_cell{end+1}   = [t_freq_crop, dip_crop, tp_crop, baseline_vec(v_idx)]; %#ok<SAGROW>
     rf_centers_Hz(end+1)  = fit_params(2); %#ok<SAGROW>
     rf_depths(end+1)      = max_dip; %#ok<SAGROW>
     valid_filenames{end+1}= rawFiles(i).name; %#ok<SAGROW>
@@ -125,7 +131,7 @@ for i = 1:length(rawFiles)
     depth_array(end+1)    = max_dip; %#ok<SAGROW>
     width_array(end+1)    = length(v_idx); %#ok<SAGROW>
     fine_f = linspace(freq(1), freq(end), 1500).';
-    fit_curves_cell{end+1}= [fine_f, local_baseline - lor(fit_params, fine_f)]; %#ok<SAGROW>
+    fit_curves_cell{end+1}= [fine_f, env_fun(fine_f) - lor(fit_params, fine_f)]; %#ok<SAGROW>
 end
 
 numFiles = length(rf_data_cell);
@@ -203,30 +209,114 @@ function M = compute_map(P, D)
     M.m_prof_ppm = m_macro_ppm + bp(1);
     M.b_prof_THz = ((b_macro + bp(2)*1e9) - b_base)/1e12;
 
-    % line fit (ICP)
-    [mlf, blf] = icp_refine(m_macro, b_macro, rfc, sig, P.f_rep_1, 40);
+    % line fit: resolve the mode by teeth-RMS, then fit curvature of the order
+    if ~isfield(P,'map_order'), P.map_order = 1; end
+    ord = P.map_order;
+    uc = mean_rf;  us = std(rfc);  if ~isfinite(us) || us <= 0, us = 1; end
+    [mlf, blf, a2, a3] = line_fit_best(m_base, center_macro, mean_rf, uc, us, ord, rfc, sig, P.f_rep_1, 60000);
     M.m_line_ppm = (mlf/m_base - 1)*1e6;
     M.b_line_THz = (blf - b_base)/1e12;
+    M.a2 = a2;  M.a3 = a3;  M.uc = uc;  M.us = us;  M.order = ord;
 
     M.m_base = m_base;  M.b_base_Hz = b_base;  M.b_base_nominal_Hz = b_nom;
     M.m_macro_ppm = m_macro_ppm;
     M.b_theo_THz  = (b_nom - b_base)/1e12;
 end
 
-function [m_full, b_full, n_v] = icp_refine(m_full, b_full, rfc, sig, f_rep, n_iter)
-% Iterative closest point: one-to-one nearest assignment + LS, to convergence.
-    rfc = rfc(:); sig = sig(:); frep_THz = f_rep/1e12; n_v = 0;
+function [m, b, a2, a3, n_v] = fit_poly(m, b, a2, a3, uc, us, ord, rfc, sig, f_rep, n_iter)
+% Iterative closest point with a least-squares POLYNOMIAL of order `ord`
+% (1=linear, 2=quadratic, 3=cubic). One-to-one nearest assignment + LS, to
+% convergence. The linear part is returned as (m,b); the curvature as (a2,a3),
+% the coefficients of u^2 and u^3 with u=(f_rf-uc)/us. This models real comb
+% dispersion (the two combs' teeth are not perfectly equidistant), which makes
+% f_opt a non-linear function of f_rf.
+    rfc = rfc(:); sig = sig(:); frep_THz = f_rep/1e12; u = (rfc-uc)/us; n_v = 0;
     for it = 1:n_iter
-        tgt = assign_lines((m_full*rfc + b_full)/1e12, sig, frep_THz);
+        fo = m*rfc + b;
+        if ord>=2, fo = fo + a2*u.^2; end
+        if ord>=3, fo = fo + a3*u.^3; end
+        tgt = assign_lines(fo/1e12, sig, frep_THz);
         g = ~isnan(tgt); n_v = sum(g);
-        if n_v < 2, return; end
-        x = rfc(g)/1e12; t = tgt(g);
-        S2 = mean(x.^2); S1 = mean(x); T2 = mean(x.*t); T1 = mean(t);
-        dv = S2 - S1^2; if abs(dv) < 1e-30, return; end
-        mp = m_full; bp = b_full;
-        m_full = (T2 - S1*T1)/dv; b_full = (T1 - S1*m_full)*1e12;
-        if abs(m_full-mp) < 1e-6*abs(mp) && abs(b_full-bp) < 1, return; end
+        if n_v < ord+1, return; end
+        ug = u(g);  U = ones(n_v, ord+1);
+        for kk = 1:ord, U(:,kk+1) = ug.^kk; end       % [1 u u^2 ...]
+        coef = U \ (tgt(g)*1e12);                     % a0,a1,a2u,a3u in u-space
+        mN = coef(2)/us;  bN = coef(1) - coef(2)*uc/us;
+        a2N = 0; a3N = 0;
+        if ord>=2, a2N = coef(3); end
+        if ord>=3, a3N = coef(4); end
+        cv = abs(mN-m) < 1e-7*max(abs(m),1) && abs(bN-b) < 1 && ...
+             abs(a2N-a2) < 1 && abs(a3N-a3) < 1;
+        m = mN; b = bN; a2 = a2N; a3 = a3N;
+        if cv, return; end
     end
+end
+
+function [m, b, a2, a3, nv, bestrms] = line_fit_best(m_base, center_macro, mean_rf, uc, us, ord, rfc, sig, f_rep, ppm_range)
+% Robust line fit that RESOLVES THE MODE by teeth-RMS (not amplitude overlap):
+% scan stretch x integer-line offset, refine each with a RIGID linear ICP
+% (order 1 can't overfit), keep the lowest-RMS registration, THEN fit the
+% curvature of the requested order at that mode. This reliably finds the
+% near-perfect mode that a flat amplitude score is blind to.
+    frep_THz = f_rep/1e12; rfc = rfc(:); sig = sig(:);
+    dl = median(diff(sort(sig)))*1e12;  if ~isfinite(dl) || dl<=0, dl = 0; end
+    ppm_list = -ppm_range:200:ppm_range;
+    boff = dl*[-1 -0.5 0 0.5 1];
+    need = max(2, round(0.5*numel(rfc)));
+    bestrms = inf; m = m_base; b = center_macro - m_base*mean_rf; a2 = 0; a3 = 0; nv = 0;
+    for pp = ppm_list
+        m0 = m_base*(1 + pp*1e-6);
+        for bo = boff
+            b0 = center_macro - m0*mean_rf + bo;
+            [mm, bb, ~, ~, nn] = fit_poly(m0, b0, 0, 0, uc, us, 1, rfc, sig, f_rep, 40);
+            if nn < need, continue; end
+            tt = nearest_teeth((mm*rfc + bb)/1e12, sig, frep_THz);
+            r = rms(tt);
+            if r < bestrms, bestrms = r; m = mm; b = bb; nv = nn; end
+        end
+    end
+    if ord >= 2 && nv >= ord+1            % refine curvature at the chosen mode
+        [m, b, a2, a3, nv] = fit_poly(m, b, 0, 0, uc, us, ord, rfc, sig, f_rep, 80);
+    end
+end
+
+function fo = map_eval(S, frf)
+% Apply the current mapping (linear m,b from the sliders + fitted curvature
+% a2,a3 of the selected order) to RF frequencies frf [Hz] -> optical [Hz].
+    frf = frf(:);
+    m = S.m_base*(1+S.sM.Value*1e-6);  b = S.b_base_Hz + S.sB.Value*1e12;
+    fo = m*frf + b;
+    if S.order>=2
+        u = (frf - S.uc)/S.us;
+        fo = fo + S.a2*u.^2;
+        if S.order>=3, fo = fo + S.a3*u.^3; end
+    end
+end
+
+function tt = nearest_teeth(mapped_THz, sig, frep_THz)
+% Signed distance (in teeth) from each mapped dip to its nearest HITRAN line.
+    mp = mapped_THz(:); sig = sig(:); tt = zeros(numel(mp),1);
+    for k = 1:numel(mp), [~,j] = min(abs(sig - mp(k))); tt(k) = (mp(k)-sig(j))/frep_THz; end
+end
+
+function [bv, envfun] = comb_envelope(tf, tp)
+% Robust upper-envelope of the comb power: an asymmetric iterative polynomial
+% (deg<=2) through the UNABSORBED teeth. Absorbed teeth sit well below the
+% envelope and are rejected each pass, so the fit tracks the comb's Gaussian
+% power top (slope + gentle curvature) rather than dipping into the absorption.
+    mu = mean(tf); sd = max(std(tf), eps);
+    tn = (tf - mu)/sd;  deg = min(2, numel(tp)-1);
+    inl = true(size(tp));  pc = polyfit(tn, tp, deg);
+    for it = 1:8
+        pc = polyfit(tn(inl), tp(inl), deg);
+        rr = tp - polyval(pc, tn);
+        sg = std(rr(inl));  if sg < eps, break; end
+        ni = rr > -1.0*sg;  ni(rr >= 0) = true;        % reject only well-below teeth
+        if sum(ni) <= deg+1 || isequal(ni, inl), break; end
+        inl = ni;
+    end
+    bv = polyval(pc, tn);
+    envfun = @(f) polyval(pc, (f(:)-mu)/sd);
 end
 
 function tgt = assign_lines(f0_THz, sig, frep_THz)
@@ -263,15 +353,6 @@ function cst = lor_cost(p, f, d, lb, ub)
     end
     lorv = p(1).*(p(3)/2).^2 ./ ((f - p(2)).^2 + (p(3)/2).^2);
     cst  = sum((d - lorv).^2);
-end
-
-function tt = teeth_to_nearest(m_full, b_full, rfc, sig, frep_THz)
-    mp = (m_full*rfc(:) + b_full)/1e12; sig = sig(:);
-    tt = zeros(numel(mp),1);
-    for k = 1:numel(mp)
-        [~,j] = min(abs(sig - mp(k)));
-        tt(k) = (mp(k) - sig(j))/frep_THz;
-    end
 end
 
 % ----------------------- UI CONSTRUCTION --------------------------------
@@ -329,6 +410,16 @@ function build_ui(P, D, M, X)
     tB = uicontrol(fig,'Style','text','Units','normalized','Position',[0.495 0.213 0.18 0.024], ...
         'String','','HorizontalAlignment','left','BackgroundColor',BG,'FontSize',8);
 
+    % --------- MAPPING ORDER SELECTOR ----------
+    uicontrol(fig,'Style','text','Units','normalized','Position',[0.055 0.168 0.10 0.022], ...
+        'String','Map order','FontWeight','bold','HorizontalAlignment','left','BackgroundColor',BG);
+    dOrd = uicontrol(fig,'Style','popupmenu','Units','normalized','Position',[0.155 0.169 0.14 0.026], ...
+        'String',{'1  (linear)','2  (quadratic)','3  (cubic)'},'Value',M.order, ...
+        'TooltipString','Polynomial order of f_opt(f_rf); >1 corrects comb-dispersion curvature');
+    uicontrol(fig,'Style','text','Units','normalized','Position',[0.305 0.165 0.37 0.026], ...
+        'String','(>1 fits the comb-dispersion curvature; refit on change)', ...
+        'HorizontalAlignment','left','BackgroundColor',BG,'FontSize',8,'ForegroundColor',[0.4 0.4 0.4]);
+
     % --------- ACTION BUTTONS (bottom row) ----------
     bw = 0.099; bx = 0.055; by = 0.045; bh = 0.05; gap = 0.005;
     btnTheo  = uicontrol(fig,'Style','pushbutton','Units','normalized','String','Theoretical', ...
@@ -362,8 +453,8 @@ function build_ui(P, D, M, X)
     % Quality
     pQual = uipanel(fig,'Title','Mapping Quality','FontWeight','bold','BackgroundColor',BG, ...
         'Position',[0.70 0.50 0.285 0.225]);
-    tQual = uicontrol(pQual,'Style','text','Units','normalized','Position',[0.06 0.05 0.9 0.9], ...
-        'String','','HorizontalAlignment','left','BackgroundColor',[1 1 1],'FontName','Menlo','FontSize',10);
+    tQual = uicontrol(pQual,'Style','text','Units','normalized','Position',[0.04 0.04 0.93 0.92], ...
+        'String','','HorizontalAlignment','left','BackgroundColor',[1 1 1],'FontName','Menlo','FontSize',9);
 
     % Comb parameters
     pPar = uipanel(fig,'Title','Comb Parameters (Hz)','FontWeight','bold','BackgroundColor',BG, ...
@@ -427,6 +518,7 @@ function build_ui(P, D, M, X)
     S.f_rep_1 = P.f_rep_1; S.mean_rf_Hz = D.mean_rf_Hz;
     S.m_macro_ppm = M.m_macro_ppm; S.m_prof_ppm = M.m_prof_ppm; S.b_prof_THz = M.b_prof_THz;
     S.m_line_ppm = M.m_line_ppm; S.b_line_THz = M.b_line_THz; S.b_theo_THz = M.b_theo_THz;
+    S.a2 = M.a2; S.a3 = M.a3; S.uc = M.uc; S.us = M.us; S.order = M.order;
     S.filtered_lines_THz = M.filtered_lines_THz; S.filtered_intensity = M.filtered_intensity;
     S.sig_hitran_THz = D.sig_hitran_THz; S.sig_intensity = D.sig_intensity;
     S.rf_centers_Hz = D.rf_centers_Hz; S.rf_depths = D.rf_depths; S.rf_data_cell = D.rf_data_cell;
@@ -436,9 +528,9 @@ function build_ui(P, D, M, X)
     % handles
     S.fig=fig; S.axC=axC; S.axR=axR; S.h_voigt=h_voigt; S.h_lines=h_lines;
     S.pC=pC; S.pS=pS; S.hRes=hRes; S.sM=sM; S.sB=sB; S.tM=tM; S.tB=tB;
-    S.cbH=cbH; S.cbR=cbR; S.cbCol=cbCol; S.dHl=dHl; S.tQual=tQual; S.eP=eP;
+    S.cbH=cbH; S.cbR=cbR; S.cbCol=cbCol; S.dHl=dHl; S.tQual=tQual; S.eP=eP; S.dOrd=dOrd;
     S.axV=axV; S.pr=pr; S.pt=pt; S.pfl=pfl; S.pff=pff; S.pcl=pcl; S.tV=tV; S.dV=dV;
-    S.figM=figM; S.a3=a3; S.a3t=a3t; S.t3=t3; S.d3=d3;
+    S.figM=figM; S.axM=a3; S.axMt=a3t; S.t3=t3; S.d3=d3;
     S.mode='line'; S.guard=false;
     S.anchor_Hz = (S.m_base*(1+S.m_line_ppm*1e-6))*S.mean_rf_Hz + (S.b_base_Hz + S.b_line_THz*1e12);
     setappdata(fig,'S',S);
@@ -456,6 +548,7 @@ function build_ui(P, D, M, X)
     cbR.Callback   = @(s,e) apply_view(fig);
     cbCol.Callback = @(s,e) refresh(fig);
     dHl.Callback   = @(s,e) apply_view(fig);
+    dOrd.Callback  = @(s,e) apply_order(fig);
     addlistener(sM,'Value','PostSet',@(s,e) on_slider(fig,'m'));
     addlistener(sB,'Value','PostSet',@(s,e) on_slider(fig,'b'));
     addlistener(a3,'XLim','PostSet',@(s,e) sync_top_axis(a3,a3t,getappdata(fig,'S')));
@@ -494,16 +587,16 @@ function on_slider(fig, which)
     refresh(fig);
 end
 
-function set_mapping(fig, m_full, b_full, do_autoscale)
+function set_mapping(fig, m_full, b_full, a2, a3, do_autoscale)
     S = getappdata(fig,'S');
     m_ppm = max(S.sM.Min, min(S.sM.Max, (m_full/S.m_base - 1)*1e6));
     b_THz = max(S.sB.Min, min(S.sB.Max, (b_full - S.b_base_Hz)/1e12));
-    S.guard = true; setappdata(fig,'S',S);
+    S.guard = true; S.a2 = a2; S.a3 = a3; setappdata(fig,'S',S);
     S.sM.Value = m_ppm; S.sB.Value = b_THz;
     S = getappdata(fig,'S'); S.guard = false;
     S.anchor_Hz = (S.m_base*(1+m_ppm*1e-6))*S.mean_rf_Hz + (S.b_base_Hz + b_THz*1e12);
     setappdata(fig,'S',S);
-    if nargin>3 && do_autoscale, autoscale_comp(fig); end
+    if nargin>5 && do_autoscale, autoscale_comp(fig); end
     refresh(fig);
     drawnow;   % force the slider thumbs to repaint to their new programmatic values
 end
@@ -511,41 +604,67 @@ end
 function snap_to(fig, kind)
     S = getappdata(fig,'S');
     switch kind
-        case 'theo', m = S.m_base;                       b = S.b_base_nominal_Hz; md = 'prof';
-        case 'prof', m = S.m_base*(1+S.m_prof_ppm*1e-6);  b = S.b_base_Hz + S.b_prof_THz*1e12; md = 'prof';
-        case 'line', m = S.m_base*(1+S.m_line_ppm*1e-6);  b = S.b_base_Hz + S.b_line_THz*1e12; md = 'line';
+        case 'theo'                                       % pure comb equations, no curvature
+            m = S.m_base; b = S.b_base_nominal_Hz; a2 = 0; a3 = 0; md = 'prof';
+        case 'prof'                                       % linear profile refine, keep curvature
+            m = S.m_base*(1+S.m_prof_ppm*1e-6); b = S.b_base_Hz + S.b_prof_THz*1e12;
+            a2 = S.a2; a3 = S.a3; md = 'prof';
+        case 'line'                                       % robust mode search + curvature at current order
+            m_macro = S.m_base*(1+S.m_macro_ppm*1e-6);
+            center_macro = S.b_base_Hz + m_macro*S.mean_rf_Hz;
+            [m, b, a2, a3, nv] = line_fit_best(S.m_base, center_macro, S.mean_rf_Hz, S.uc, S.us, ...
+                S.order, S.rf_centers_Hz, S.sig_hitran_THz, S.f_rep_1, 60000);
+            if nv < S.order+1                             % fall back to stored line fit
+                m = S.m_base*(1+S.m_line_ppm*1e-6); b = S.b_base_Hz + S.b_line_THz*1e12;
+                a2 = S.a2; a3 = S.a3;
+            end
+            md = 'line';
     end
     S.mode = md; setappdata(fig,'S',S);
     apply_view(fig);
-    set_mapping(fig, m, b, true);
+    set_mapping(fig, m, b, a2, a3, true);
 end
 
 function local_snap(fig)
     S = getappdata(fig,'S');
     m0 = S.m_base*(1+S.sM.Value*1e-6); b0 = S.b_base_Hz + S.sB.Value*1e12;
     frep_THz = S.f_rep_1/1e12;
-    [mN, bN, nv] = icp_refine(m0, b0, S.rf_centers_Hz, S.sig_hitran_THz, S.f_rep_1, 40);
-    if nv < 2
-        fprintf('[Local Peak Snap] <2 dips within range of a line — align red≈black closer first.\n'); return
+    tb = nearest_teeth(map_eval(S, S.rf_centers_Hz)/1e12, S.sig_hitran_THz, frep_THz);
+    [mN, bN, a2, a3, nv] = fit_poly(m0, b0, S.a2, S.a3, S.uc, S.us, S.order, ...
+        S.rf_centers_Hz, S.sig_hitran_THz, S.f_rep_1, 80);
+    if nv < S.order+1
+        fprintf('[Local Peak Snap] <%d dips within range of a line — align red≈black closer first.\n', S.order+1); return
     end
-    tb = teeth_to_nearest(m0,b0,S.rf_centers_Hz,S.sig_hitran_THz,frep_THz);
-    set_mapping(fig, mN, bN, false);
-    S = getappdata(fig,'S');
-    m1 = S.m_base*(1+S.sM.Value*1e-6); b1 = S.b_base_Hz + S.sB.Value*1e12;
-    ta = teeth_to_nearest(m1,b1,S.rf_centers_Hz,S.sig_hitran_THz,frep_THz);
-    fprintf('[Local Peak Snap] converged on %d dips: RMS %.2f -> %.2f teeth\n', nv, rms(tb), rms(ta));
+    set_mapping(fig, mN, bN, a2, a3, false);
+    S2 = getappdata(fig,'S');
+    ta = nearest_teeth(map_eval(S2, S2.rf_centers_Hz)/1e12, S2.sig_hitran_THz, frep_THz);
+    fprintf('[Local Peak Snap] order %d, converged on %d dips: RMS %.2f -> %.2f teeth\n', S.order, nv, rms(tb), rms(ta));
 end
 
 function mode_step(fig, dir)
-    % Shift the registration by ~one HITRAN line spacing, then snap (ICP).
+    % Shift the registration by ~one HITRAN line spacing, then snap (poly ICP).
     S = getappdata(fig,'S');
     m0 = S.m_base*(1+S.sM.Value*1e-6); b0 = S.b_base_Hz + S.sB.Value*1e12;
     dl = median(diff(sort(S.filtered_lines_THz)))*1e12;     % Hz, one line spacing
     if ~isfinite(dl) || dl<=0, dl = median(diff(sort(S.sig_hitran_THz)))*1e12; end
-    [mN, bN, nv] = icp_refine(m0, b0 + dir*dl, S.rf_centers_Hz, S.sig_hitran_THz, S.f_rep_1, 40);
-    if nv < 2, fprintf('[Mode step] no lines in range after shift.\n'); return; end
-    set_mapping(fig, mN, bN, false);
-    fprintf('[Mode step] shifted %+d line; snapped.\n', dir);
+    [mN, bN, a2, a3, nv] = fit_poly(m0, b0 + dir*dl, S.a2, S.a3, S.uc, S.us, S.order, ...
+        S.rf_centers_Hz, S.sig_hitran_THz, S.f_rep_1, 80);
+    if nv < S.order+1, fprintf('[Mode step] no lines in range after shift.\n'); return; end
+    set_mapping(fig, mN, bN, a2, a3, false);
+    fprintf('[Mode step] shifted %+d line; snapped (order %d).\n', dir, S.order);
+end
+
+function apply_order(fig)
+    % Re-fit the mapping polynomial at the newly selected order, keeping the
+    % current mode (linear position); the curvature terms are recomputed.
+    S = getappdata(fig,'S');
+    S.order = S.dOrd.Value; setappdata(fig,'S',S);       % 1,2,3
+    m0 = S.m_base*(1+S.sM.Value*1e-6); b0 = S.b_base_Hz + S.sB.Value*1e12;
+    [m, b, a2, a3, nv] = fit_poly(m0, b0, 0, 0, S.uc, S.us, S.order, ...
+        S.rf_centers_Hz, S.sig_hitran_THz, S.f_rep_1, 80);
+    if nv >= S.order+1, set_mapping(fig, m, b, a2, a3, false);
+    else,               set_mapping(fig, m0, b0, 0, 0, false); end
+    fprintf('[Map order] set to %d.\n', S.order);
 end
 
 function recompute(fig)
@@ -559,11 +678,13 @@ function recompute(fig)
         warndlg('Invalid comb parameters (check f_{rep,1} \neq f_{rep,2}).','Recompute'); return;
     end
     fprintf('Recomputing mapping with edited comb parameters...\n');
+    P.map_order = S.order;                                % keep the user's chosen order
     M = compute_map(P, S.D);
     S.P = P; S.f_rep_1 = P.f_rep_1;
     S.m_base=M.m_base; S.b_base_Hz=M.b_base_Hz; S.b_base_nominal_Hz=M.b_base_nominal_Hz;
     S.m_macro_ppm=M.m_macro_ppm; S.m_prof_ppm=M.m_prof_ppm; S.b_prof_THz=M.b_prof_THz;
     S.m_line_ppm=M.m_line_ppm; S.b_line_THz=M.b_line_THz; S.b_theo_THz=M.b_theo_THz;
+    S.a2=M.a2; S.a3=M.a3; S.uc=M.uc; S.us=M.us; S.order=M.order;
     S.filtered_lines_THz=M.filtered_lines_THz; S.filtered_intensity=M.filtered_intensity;
     setappdata(fig,'S',S);
     set(S.h_lines,'XData',M.filtered_lines_THz,'YData',M.filtered_intensity);
@@ -596,13 +717,13 @@ function refresh(fig)
     S = getappdata(fig,'S');
     m = S.m_base*(1+S.sM.Value*1e-6); b = S.b_base_Hz + S.sB.Value*1e12;
     frep_THz = S.f_rep_1/1e12; rfc = S.rf_centers_Hz; rfd = S.rf_depths;
-    % label shows the ABSOLUTE multiplier m used in f_opt=m*f_rf+b, plus the ppm
-    % deviation from the nominal m_base (the quantity the slider actually tunes).
+    % label shows the linear part (m used in f_opt = m*f_rf + b + curvature),
+    % plus the ppm deviation from m_base (the quantity the slider tunes).
     set(S.tM,'String',sprintf('m = %.3f  (%+.0f ppm)', m, S.sM.Value));
     set(S.tB,'String',sprintf('b = %.4e Hz', b));
 
-    mapped = (m*rfc + b)/1e12;
-    tt = teeth_to_nearest(m, b, rfc, S.sig_hitran_THz, frep_THz);
+    mapped = map_eval(S, rfc)/1e12;
+    tt = nearest_teeth(mapped, S.sig_hitran_THz, frep_THz);
     cols = zeros(numel(rfc),3);
     for i = 1:numel(rfc), cols(i,:) = mismatch_color(tt(i)); end
     colOn  = logical(S.cbCol.Value);
@@ -610,7 +731,7 @@ function refresh(fig)
     hl = S.dHl.Value;
 
     for i = 1:numel(rfc)
-        set(S.pC(i),'XData',(m*S.rf_data_cell{i}(:,1)+b)/1e12);
+        set(S.pC(i),'XData', map_eval(S, S.rf_data_cell{i}(:,1))/1e12);
         set(S.pS(i),'XData',mapped(i),'YData',rfd(i));
         if useCol, c = cols(i,:); else, c = [0.85 0 0]; end
         set(S.pS(i),'Color',c,'MarkerFaceColor',c);
@@ -627,39 +748,48 @@ function refresh(fig)
     mx = max([2; abs(tt(:))]);
     ylim(S.axR,[-1.15*mx 1.15*mx]); xlim(S.axR, xlim(S.axC));
 
+    % curvature contribution across the dips, in teeth (0 for order 1)
+    u = (rfc - S.uc)/S.us; hi = zeros(size(u));
+    if S.order>=2, hi = hi + S.a2*u.^2; end
+    if S.order>=3, hi = hi + S.a3*u.^3; end
+    curv_teeth = (max(hi)-min(hi))/S.f_rep_1;
+    ordname = {'linear','quadratic','cubic'};
+
     % quality readout
     nmatch = sum(~isnan(assign_lines(mapped, S.sig_hitran_THz, frep_THz)));
     S.tQual.String = sprintf(['RMS mismatch  : %6.2f teeth\nMean |mismatch|: %6.2f teeth\n' ...
-        'Max mismatch  : %6.2f teeth\nMatched 1:1   : %4d / %d\n\nstretch m : %+.0f ppm\noffset  b : %.5e Hz'], ...
-        rms(tt), mean(abs(tt)), max(abs(tt)), nmatch, numel(rfc), S.sM.Value, b);
+        'Max mismatch  : %6.2f teeth\nMatched 1:1   : %4d / %d\n\n' ...
+        'model     : order %d (%s)\ncurv span : %7.1f teeth\nstretch m : %+.0f ppm\noffset  b : %.4e Hz'], ...
+        rms(tt), mean(abs(tt)), max(abs(tt)), nmatch, numel(rfc), ...
+        S.order, ordname{S.order}, curv_teeth, S.sM.Value, b);
 
-    draw_mismatch(fig, m, b);
+    draw_mismatch(fig);
 end
 
-function draw_mismatch(fig, m, b)
+function draw_mismatch(fig)
     S = getappdata(fig,'S'); idx = S.d3.Value; frep = S.f_rep_1;
     rdata = S.rf_data_cell{idx};
-    opt_center = (m*S.rf_centers_Hz(idx)+b)/1e12;
+    opt_center = map_eval(S, S.rf_centers_Hz(idx))/1e12;
     [~,j] = min(abs(S.sig_hitran_THz - opt_center)); f_h = S.sig_hitran_THz(j);
-    S.a3.UserData = f_h;
+    S.axM.UserData = f_h;
     dn = (opt_center - f_h)*1e12/frep;
-    rel = ((m*rdata(:,1)+b)/1e12 - f_h)*1e12/frep;
-    keepXY = ~isempty(S.a3.Children) && isfield(S,'mism_idx') && isequal(S.mism_idx, idx);
-    if keepXY, xl = S.a3.XLim; yl = S.a3.YLim;
+    rel = (map_eval(S, rdata(:,1))/1e12 - f_h)*1e12/frep;
+    keepXY = ~isempty(S.axM.Children) && isfield(S,'mism_idx') && isequal(S.mism_idx, idx);
+    if keepXY, xl = S.axM.XLim; yl = S.axM.YLim;
     else
         sp = [min([rel(:);0]) max([rel(:);0])]; pad = max(6,0.3*diff(sp));
         xl = [sp(1)-pad sp(2)+pad]; yl = [0 max(rdata(:,2))*1.25+1e-3];
     end
-    cla(S.a3); hold(S.a3,'on');
-    stem(S.a3, rel, rdata(:,2),'b','Marker','.','LineWidth',1.5,'DisplayName','Mapped comb teeth');
-    xline(S.a3,(opt_center-f_h)*1e12/frep,'b--','LineWidth',1.5,'DisplayName',sprintf('Mapped centre (%.6f THz)',opt_center));
-    stem(S.a3,0,max(rdata(:,2))*1.1,'r','Marker','diamond','MarkerFaceColor','r','LineWidth',2, ...
+    cla(S.axM); hold(S.axM,'on');
+    stem(S.axM, rel, rdata(:,2),'b','Marker','.','LineWidth',1.5,'DisplayName','Mapped comb teeth');
+    xline(S.axM,(opt_center-f_h)*1e12/frep,'b--','LineWidth',1.5,'DisplayName',sprintf('Mapped centre (%.6f THz)',opt_center));
+    stem(S.axM,0,max(rdata(:,2))*1.1,'r','Marker','diamond','MarkerFaceColor','r','LineWidth',2, ...
         'DisplayName',sprintf('HITRAN target (%.6f THz)',f_h));
     S.t3.String = sprintf('%s  |  Mismatch: %+.2f teeth', S.valid_filenames{idx}, dn);
-    legend(S.a3,'Location','northeast');
-    xlim(S.a3,xl); ylim(S.a3,yl);
+    legend(S.axM,'Location','northeast');
+    xlim(S.axM,xl); ylim(S.axM,yl);
     S.mism_idx = idx; setappdata(fig,'S',S);
-    sync_top_axis(S.a3, S.a3t, S);
+    sync_top_axis(S.axM, S.axMt, S);
 end
 
 function mism_step(fig, dir)
@@ -674,9 +804,9 @@ function sync_top_axis(a3, a3t, S)
 end
 
 function autoscale_comp(fig)
-    S = getappdata(fig,'S'); m = S.m_base*(1+S.sM.Value*1e-6); b = S.b_base_Hz+S.sB.Value*1e12;
+    S = getappdata(fig,'S');
     allx = [];
-    for i=1:numel(S.rf_centers_Hz), allx = [allx; (m*S.rf_data_cell{i}(:,1)+b)/1e12]; end %#ok<AGROW>
+    for i=1:numel(S.rf_centers_Hz), allx = [allx; map_eval(S, S.rf_data_cell{i}(:,1))/1e12]; end %#ok<AGROW>
     if ~isempty(allx), xlim(S.axC,[min(allx)-0.1 max(allx)+0.1]); end
     ylim(S.axC,[-0.05 1.15]);
 end
@@ -699,20 +829,39 @@ function export_results(fig)
     S = getappdata(fig,'S');
     m = S.m_base*(1+S.sM.Value*1e-6); b = S.b_base_Hz + S.sB.Value*1e12;
     frep_THz = S.f_rep_1/1e12;
-    mapped = (m*S.rf_centers_Hz + b)/1e12;
+    mapped = map_eval(S, S.rf_centers_Hz)/1e12;
     tgt = assign_lines(mapped, S.sig_hitran_THz, frep_THz);
-    tt  = teeth_to_nearest(m, b, S.rf_centers_Hz, S.sig_hitran_THz, frep_THz);
+    tt  = nearest_teeth(mapped, S.sig_hitran_THz, frep_THz);
+
+    % Expand the mapping to absolute-frequency polynomial coefficients so it can
+    % be applied directly:  f_opt = c3*f_rf^3 + c2*f_rf^2 + c1*f_rf + c0  (Hz).
+    a2 = S.a2; a3 = S.a3; uc = S.uc; us = S.us; ord = S.order;
+    if ord < 3, a3 = 0; end
+    if ord < 2, a2 = 0; end
+    c3 = a3/us^3;
+    c2 = a2/us^2 - 3*a3*uc/us^3;
+    c1 = m - 2*a2*uc/us^2 + 3*a3*uc^2/us^3;
+    c0 = b + a2*uc^2/us^2 - a3*uc^3/us^3;
+    ordname = {'linear','quadratic','cubic'};
+
     [fn,pn] = uiputfile('*.csv','Export mapping results', fullfile(S.folderPath,'rf_to_optical_results.csv'));
     if isequal(fn,0), return; end
     fid = fopen(fullfile(pn,fn),'wt');
     fprintf(fid,'# RF -> Optical mapping results\n');
-    fprintf(fid,'# Mapping model:  f_opt = m * f_rf + b\n');
+    fprintf(fid,'# Mapping model:  f_opt = c3*f_rf^3 + c2*f_rf^2 + c1*f_rf + c0   (Hz)\n');
+    fprintf(fid,'#   polynomial order = %d (%s)\n', ord, ordname{ord});
     fprintf(fid,'#\n');
-    fprintf(fid,'# Applied mapping (current sliders)\n');
+    fprintf(fid,'# Applied mapping coefficients (f_rf in Hz, f_opt in Hz)\n');
+    fprintf(fid,'#   c0 = %.12g\n', c0);
+    fprintf(fid,'#   c1 = %.12g\n', c1);
+    fprintf(fid,'#   c2 = %.12g   (0 if order<2)\n', c2);
+    fprintf(fid,'#   c3 = %.12g   (0 if order<3)\n', c3);
+    fprintf(fid,'#\n');
+    fprintf(fid,'# Linear part (sliders): f_opt ~ m*f_rf + b (+ curvature for order>1)\n');
     fprintf(fid,'#   m (stretch) = %.10g\n', m);
     fprintf(fid,'#   b (offset)  = %.10g Hz\n', b);
     fprintf(fid,'#\n');
-    fprintf(fid,'# Theoretical mapping (from comb parameters)\n');
+    fprintf(fid,'# Theoretical linear mapping (from comb parameters, no dispersion)\n');
     fprintf(fid,'#   m_theoretical = %.10g\n', S.m_base);
     fprintf(fid,'#   b_theoretical = %.10g Hz\n', S.b_base_nominal_Hz);
     fprintf(fid,'#\n');
