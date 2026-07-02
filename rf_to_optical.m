@@ -1,5 +1,5 @@
 % =========================================================================
-% RF -> Optical Mapping Suite
+% RF -> Optical Mapping
 %   Band-anchored global alignment + interactive line-to-line refinement.
 %   Features: editable comb parameters w/ recompute, mode stepper, live
 %   mapping-quality readout, mismatch colour-coding, residual plot, export.
@@ -21,7 +21,7 @@ min_dip_depth   = 1.5;
 min_teeth_width = 4;
 
 %% 2. LOAD HITRAN DATABASES
-startFolder = '/Users/weihengwang/Documents/MATLAB/DCS/data/';
+startFolder = '/Users/weihengwang/Documents/MATLAB/DCS/data/'; % CHANGE THIS <---
 fprintf('Loading HITRAN continuous curve...\n');
 hitranFile = fullfile(startFolder, 'SpectrMol_Ab.coef.txt');
 if ~isfile(hitranFile)
@@ -49,8 +49,8 @@ for k = 1:length(rawLines)
     if isempty(str) || startsWith(str, '#'), continue; end
     tokens = sscanf(str, '%f');
     if length(tokens) >= 3
-        raw_hitran_lines_THz(end+1) = (c * tokens(2) * 100) / 1e12; %#ok<SAGROW>
-        raw_line_intensity(end+1) = tokens(3); %#ok<SAGROW>
+        raw_hitran_lines_THz(end+1) = (c * tokens(2) * 100) / 1e12;
+        raw_line_intensity(end+1) = tokens(3);
     end
 end
 raw_line_intensity = raw_line_intensity / max(raw_line_intensity, [], 'omitnan');
@@ -122,16 +122,16 @@ for i = 1:length(rawFiles)
     guess = [max_dip, f_deep, span_c/3];
     fit_params = fminsearch(@(p) lor_cost(p, t_freq_crop, dip_crop, lb, ub), guess, optimset('Display','off'));
 
-    rf_raw_cell{end+1}    = [freq, power]; %#ok<SAGROW>
-    rf_data_cell{end+1}   = [t_freq_crop, dip_crop, tp_crop, baseline_vec(v_idx)]; %#ok<SAGROW>
-    rf_centers_Hz(end+1)  = fit_params(2); %#ok<SAGROW>
-    rf_depths(end+1)      = max_dip; %#ok<SAGROW>
-    valid_filenames{end+1}= rawFiles(i).name; %#ok<SAGROW>
-    snr_array(end+1)      = snr; %#ok<SAGROW>
-    depth_array(end+1)    = max_dip; %#ok<SAGROW>
-    width_array(end+1)    = length(v_idx); %#ok<SAGROW>
+    rf_raw_cell{end+1}    = [freq, power];
+    rf_data_cell{end+1}   = [t_freq_crop, dip_crop, tp_crop, baseline_vec(v_idx)];
+    rf_centers_Hz(end+1)  = fit_params(2);
+    rf_depths(end+1)      = max_dip;
+    valid_filenames{end+1}= rawFiles(i).name;
+    snr_array(end+1)      = snr;
+    depth_array(end+1)    = max_dip;
+    width_array(end+1)    = length(v_idx);
     fine_f = linspace(freq(1), freq(end), 1500).';
-    fit_curves_cell{end+1}= [fine_f, env_fun(fine_f) - lor(fit_params, fine_f)]; %#ok<SAGROW>
+    fit_curves_cell{end+1}= [fine_f, env_fun(fine_f) - lor(fit_params, fine_f)];
 end
 
 numFiles = length(rf_data_cell);
@@ -319,7 +319,7 @@ function tgt = assign_lines(f0_THz, sig, frep_THz)
     cand = zeros(0,3);
     for i = 1:nd
         dd = sig - f0(i); j = find(abs(dd) <= HUNT);
-        for jj = j(:).', cand(end+1,:) = [i, jj, abs(dd(jj))/frep_THz]; end %#ok<AGROW>
+        for jj = j(:).', cand(end+1,:) = [i, jj, abs(dd(jj))/frep_THz]; end
     end
     tgt = nan(nd,1);
     if ~isempty(cand)
@@ -830,7 +830,7 @@ end
 function autoscale_comp(fig)
     S = getappdata(fig,'S');
     allx = [];
-    for i=1:numel(S.rf_centers_Hz), allx = [allx; map_eval(S, S.rf_data_cell{i}(:,1))/1e12]; end %#ok<AGROW>
+    for i=1:numel(S.rf_centers_Hz), allx = [allx; map_eval(S, S.rf_data_cell{i}(:,1))/1e12]; end
     if ~isempty(allx), xlim(S.axC,[min(allx)-0.1 max(allx)+0.1]); end
     ylim(S.axC,[-0.05 1.15]);
 end
